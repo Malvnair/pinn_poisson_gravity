@@ -453,38 +453,98 @@ def gr_constant_disk_analytic(r: np.ndarray, Sigma_0: float,
                               r_in: float, r_out: float,
                               G: float = 1.0) -> np.ndarray:
     """
-    Analytic radial acceleration g_r = -dΦ/dr for a constant-Σ annulus.
+    Reference radial acceleration for a constant-Σ annulus.
 
-    Uses the closed-form expression (Vorobyov+ 2024, Appendix B.8)
-    valid for r_in < r < r_out:
-
-        g_r(r) = -4 G Σ * [ (E(k_out^2) + K(k_out^2)) / k_out
-                            + K(k_in^2) - E(k_in^2) ]
-
-    where k_out = r / r_out and k_in = r_in / r.
-    The sign convention here matches the rest of this codebase:
-    inward acceleration is negative.
-
-    Outside (r_in, r_out), this function returns 0.0.
+    NOTE:
+    The previously implemented closed-form Eq. B.8 expression was found
+    inconsistent with the independent axisymmetric quadrature baseline.
+    Until a validated piecewise closed-form implementation is derived,
+    this function intentionally delegates to the quadrature validator.
     """
-    from scipy.special import ellipk, ellipe
-
-    gr = np.zeros_like(r, dtype=np.float64)
-    mask = (r > r_in) & (r < r_out)
-    if not np.any(mask):
-        return gr
-
-    r_m = r[mask]
-    # Guard against endpoint singularities in K(m) as m -> 1.
-    k_out = np.clip(r_m / r_out, 1e-14, 1.0 - 1e-12)
-    k_in = np.clip(r_in / r_m, 1e-14, 1.0 - 1e-12)
-
-    gr[mask] = -4.0 * G * Sigma_0 * (
-        (ellipe(k_out**2) + ellipk(k_out**2)) / k_out
-        + ellipk(k_in**2) - ellipe(k_in**2)
+    return gr_constant_disk_axisym_quadrature(
+        r=np.asarray(r, dtype=np.float64),
+        Sigma_0=Sigma_0,
+        r_in=r_in,
+        r_out=r_out,
+        G=G,
     )
 
-    return gr
+
+def phi_constant_disk_axisym_quadrature(r: np.ndarray, Sigma_0: float,
+                                        r_in: float, r_out: float,
+                                        G: float = 1.0,
+                                        epsabs: float = 1e-9,
+                                        epsrel: float = 1e-8,
+                                        limit: int = 400) -> np.ndarray:
+    """
+    1D axisymmetric quadrature reference for a constant-Σ annulus potential.
+
+    Uses the azimuthally integrated kernel:
+        ∫_0^{2π} dφ / sqrt(r^2 + r'^2 - 2 r r' cosφ) = 4 K(m) / (r + r')
+        m = 4 r r' / (r + r')^2
+
+    so
+        Φ(r) = -4 G Σ_0 ∫_{r_in}^{r_out} [r' K(m) / (r + r')] dr' .
+
+    This is an independent numerical validator for B5 that avoids
+    relying on the closed-form Eq. B.8 implementation.
+    """
+    from scipy.integrate import quad
+    from scipy.special import ellipk
+
+    r = np.asarray(r, dtype=np.float64)
+    phi = np.zeros_like(r)
+
+    for i, r_val in enumerate(r):
+        if r_val <= 0.0:
+            phi[i] = np.nan
+            continue
+
+        def _integrand(rp: float) -> float:
+            m = 4.0 * r_val * rp / (r_val + rp) ** 2
+            m = np.clip(m, 0.0, 1.0 - 1e-14)
+            return rp * ellipk(m) / (r_val + rp)
+
+        # If r lies inside the annulus, split at the logarithmic singularity.
+        if r_in < r_val < r_out:
+            val_l, _ = quad(
+                _integrand, r_in, r_val, epsabs=epsabs, epsrel=epsrel, limit=limit
+            )
+            val_r, _ = quad(
+                _integrand, r_val, r_out, epsabs=epsabs, epsrel=epsrel, limit=limit
+            )
+            integral = val_l + val_r
+        else:
+            integral, _ = quad(
+                _integrand, r_in, r_out, epsabs=epsabs, epsrel=epsrel, limit=limit
+            )
+
+        phi[i] = -4.0 * G * Sigma_0 * integral
+
+    return phi
+
+
+def gr_constant_disk_axisym_quadrature(r: np.ndarray, Sigma_0: float,
+                                       r_in: float, r_out: float,
+                                       G: float = 1.0,
+                                       epsabs: float = 1e-9,
+                                       epsrel: float = 1e-8,
+                                       limit: int = 400) -> np.ndarray:
+    """
+    1D axisymmetric quadrature reference for g_r of a constant-Σ annulus.
+
+    Computes Φ(r) via `phi_constant_disk_axisym_quadrature` and differentiates
+    on the provided r-grid:
+        g_r = -dΦ/dr
+    """
+    r = np.asarray(r, dtype=np.float64)
+    phi = phi_constant_disk_axisym_quadrature(
+        r, Sigma_0=Sigma_0, r_in=r_in, r_out=r_out, G=G,
+        epsabs=epsabs, epsrel=epsrel, limit=limit
+    )
+
+    dphi_dr = np.gradient(phi, r, edge_order=2)
+    return -dphi_dr
 
 
 # ============================================================

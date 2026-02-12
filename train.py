@@ -16,6 +16,7 @@ import yaml
 import argparse
 import time
 import csv
+import random
 import numpy as np
 import torch
 import torch.optim as optim
@@ -79,6 +80,15 @@ def save_checkpoint(model, optimizer, epoch, loss, path):
         'optimizer_state_dict': optimizer.state_dict(),
         'loss': loss,
     }, path)
+
+
+def set_global_seed(seed: int):
+    """Set reproducible random seeds for Python, NumPy, and PyTorch."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 # ============================================================
@@ -542,6 +552,8 @@ def main():
                         help='Override collocation batch size from config')
     parser.add_argument('--force-weight', type=float, default=None,
                         help='Override force loss weight from config')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for reproducible training')
     args = parser.parse_args()
     
     # Load config
@@ -554,6 +566,9 @@ def main():
         cfg['pinn_modeA']['training']['batch_size'] = int(args.batch_size)
     if args.force_weight is not None:
         cfg['pinn_modeA']['training']['loss_weights']['force'] = float(args.force_weight)
+
+    if args.seed is not None:
+        set_global_seed(int(args.seed))
     
     # Output directory
     os.makedirs(args.outdir, exist_ok=True)
@@ -571,6 +586,8 @@ def main():
     print(f"  ε/Δr:    {eps_dr}")
     print(f"  Device:  {device}")
     print(f"  Output:  {args.outdir}")
+    if args.seed is not None:
+        print(f"  Seed:    {args.seed}")
     
     # Stage 0: Sanity checks
     if not args.skip_sanity:

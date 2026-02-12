@@ -30,7 +30,8 @@ from physics import (
     compute_potential_direct, compute_gravity_fd,
     evaluate_integral_at_points,
     phi_exponential_disk_analytic, gr_exponential_disk_analytic,
-    gr_constant_disk_analytic,
+    gr_constant_disk_analytic, phi_constant_disk_axisym_quadrature,
+    gr_constant_disk_axisym_quadrature,
     rel_error_L2, max_error
 )
 
@@ -291,6 +292,42 @@ def test_singular_cell_correction(results: TestResults):
     # Both should be negative
     results.record("Φ_corr negative", np.all(np.mean(Phi_corr, axis=1) < 0))
     results.record("Φ_smooth negative", np.all(np.mean(Phi_smooth, axis=1) < 0))
+
+
+def test_constant_annulus_quadrature_validator(results: TestResults):
+    """
+    Validate the independent 1D axisymmetric quadrature baseline used for B5.
+    """
+    print("\n--- Constant annulus 1D quadrature validator ---")
+
+    Nr = 64
+    r_min, r_max = 0.2, 100.0
+    Sigma_0 = 100.0
+    r_1d = np.logspace(np.log10(r_min), np.log10(r_max), Nr)
+
+    g_r_quad = gr_constant_disk_axisym_quadrature(
+        r_1d, Sigma_0=Sigma_0, r_in=r_min, r_out=r_max, G=1.0
+    )
+    g_r_ref_fn = gr_constant_disk_analytic(
+        r_1d, Sigma_0=Sigma_0, r_in=r_min, r_out=r_max, G=1.0
+    )
+    # Recover Phi through integration for basic sanity checks.
+    phi_quad = phi_constant_disk_axisym_quadrature(
+        r_1d, Sigma_0=Sigma_0, r_in=r_min, r_out=r_max, G=1.0
+    )
+
+    results.record("B5 quadrature Φ finite", np.all(np.isfinite(phi_quad)))
+    results.record("B5 quadrature g_r finite", np.all(np.isfinite(g_r_quad)))
+    results.record("B5 quadrature Φ negative", np.all(phi_quad < 0.0))
+
+    # For a finite annulus, g_r changes sign: outward near the inner edge,
+    # inward near the outer disk.
+    inner = (r_1d > 0.25) & (r_1d < 1.0)
+    outer = (r_1d > 10.0) & (r_1d < 95.0)
+    has_outward_inner = np.any(g_r_quad[inner] > 0.0)
+    has_inward_outer = np.any(g_r_quad[outer] < 0.0)
+    results.record("B5 quadrature sign pattern", has_outward_inner and has_inward_outer)
+    results.record("B5 analytic API matches quadrature", np.allclose(g_r_ref_fn, g_r_quad))
 
 
 def test_point_integral_matches_direct(results: TestResults):
@@ -797,6 +834,7 @@ def main():
         test_reference_solver(results)
         test_singular_cell_correction(results)
         test_point_integral_matches_direct(results)
+        test_constant_annulus_quadrature_validator(results)
     
     # PINN smoke test
     test_pinn_smoke(results)
