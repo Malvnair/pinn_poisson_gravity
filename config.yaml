@@ -1,0 +1,134 @@
+# ============================================================
+# Gravity-PINN: Thin-Disk Poisson Integral Solver
+# Configuration file
+# ============================================================
+# Physics: Φ(r,φ) = -G ∫∫ Σ(r',φ') r' dr' dφ' / √(r²+r'²-2rr'cos(φ-φ')+ε²)
+# Reference: Vorobyov et al. (2024), Vorobyov & Basu (2010)
+# ============================================================
+
+# --- Domain ---
+domain:
+  r_min: 0.2          # [AU] inner boundary (matches FEOSAD sink cell)
+  r_max: 100.0         # [AU] outer boundary
+  N_r: 128             # radial grid points (log-spaced)
+  N_phi: 128           # azimuthal grid points (uniform)
+
+# --- Physical constants (CGS) ---
+physics:
+  G: 6.674e-8          # gravitational constant [cm³ g⁻¹ s⁻²]
+  # For dimensionless tests, set G=1 and use code units
+  use_code_units: true  # if true, G=1, Σ₀=1, R₀=1
+
+# --- Smoothing length ---
+smoothing:
+  # epsilon values for the ε-sweep benchmark
+  # In units of local radial cell size Δr (computed at runtime)
+  epsilon_list: [0.0, 0.25, 0.5, 1.0, 2.0]
+  # Default epsilon for training (in Δr units)
+  default_epsilon_dr: 0.5
+  # Singular-cell correction (Binney & Tremaine method)
+  use_singular_cell_correction: true
+
+# --- Benchmark test cases ---
+benchmarks:
+  B1_smooth_disk:
+    type: "exponential"
+    Sigma_0: 10.0       # peak surface density
+    R_scale: 10.0       # scale radius [AU]
+    # Σ(r,φ) = Σ₀ exp(-r/R_scale)
+    
+  B2_nonaxisymmetric:
+    type: "exponential_perturbed"
+    Sigma_0: 10.0
+    R_scale: 10.0
+    A_pert: 0.3          # perturbation amplitude
+    m_mode: 2            # azimuthal mode number
+    # Σ(r,φ) = Σ₀ exp(-r/R)(1 + A cos(mφ))
+    
+  B3_single_clump:
+    type: "clump_on_background"
+    Sigma_bg: 1.0
+    Sigma_clump: 50.0
+    r_clump: 20.0        # clump radial position [AU]
+    phi_clump: 1.57       # clump azimuthal position [rad]
+    sigma_r: 3.0          # clump radial width [AU]
+    sigma_phi: 0.3        # clump azimuthal width [rad]
+    
+  B4_multi_clump:
+    type: "multi_clump"
+    Sigma_bg: 1.0
+    clumps:
+      - {Sigma: 40.0, r: 15.0, phi: 0.5,  sigma_r: 2.0, sigma_phi: 0.2}
+      - {Sigma: 60.0, r: 30.0, phi: 2.5,  sigma_r: 4.0, sigma_phi: 0.3}
+      - {Sigma: 25.0, r: 50.0, phi: 4.5,  sigma_r: 5.0, sigma_phi: 0.4}
+
+  B5_constant_density:
+    type: "constant"
+    Sigma_0: 100.0
+    r_in: 0.2            # inner edge
+    r_out: 100.0          # outer edge
+    # Analytic solution: Durand (1964), Eq. B.8 in Vorobyov+ 2024
+
+# --- PINN Mode A (solver-per-Σ) ---
+pinn_modeA:
+  network:
+    hidden_layers: 6
+    hidden_units: 128
+    activation: 'siren'       # sinusoidal for smooth periodic functions
+    siren_omega_0: 10.0
+    siren_omega: 1.0
+    # Input: (r̃, sin φ, cos φ) → 3D
+    # Output: Φ(r,φ) → 1D
+    
+  training:
+    epochs: 10000
+    batch_size: 2048          # collocation points per batch
+    optimizer: 'adam'
+    lr_initial: 1.0e-3
+    lr_min: 1.0e-6
+    lr_schedule: 'cosine'
+    grad_clip: 1.0
+    
+    # Gauge fixing
+    gauge: 'mean_zero'        # or 'anchor_point'
+    anchor_r: 100.0           # used if gauge='anchor_point'
+    anchor_phi: 0.0
+    
+    # Loss weights
+    loss_weights:
+      integral: 1.0
+      gauge: 10.0
+      force: 0.5            # gravity matching: MSE(g_r, g_phi)
+      smoothness: 0.001       # optional Laplacian regularizer
+      
+    # Convergence
+    patience: 2000
+    rel_tol: 1.0e-4
+
+# --- PINN Mode B (reusable surrogate, optional) ---
+pinn_modeB:
+  enabled: false
+  # Training dataset
+  n_training_snapshots: 200
+  n_validation_snapshots: 50
+  
+  network:
+    type: 'fno_polar'         # Fourier Neural Operator adapted for polar
+    modes_r: 16
+    modes_phi: 16
+    width: 64
+    n_layers: 4
+
+  training:
+    epochs: 500
+    batch_size: 16
+    lr: 1.0e-3
+
+# --- Evaluation ---
+evaluation:
+  save_plots: true
+  plot_format: 'png'
+  plot_dpi: 150
+  save_csv: true
+  # Radial cuts for comparison plots
+  radial_cut_phis: [0.0, 1.5708, 3.1416]  # φ = 0, π/2, π
