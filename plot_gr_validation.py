@@ -88,7 +88,8 @@ def infer_phi_affine_from_npz(
     return a, b
 
 
-def analytic_gr(case_name: str, case_cfg: dict, r: np.ndarray, g_const: float) -> np.ndarray:
+def analytic_gr(case_name: str, case_cfg: dict, r: np.ndarray, g_const: float,
+                epsilon_analytic: float = 0.0) -> np.ndarray:
     tp = case_cfg["type"]
     if tp == "exponential":
         return gr_exponential_disk_analytic(
@@ -101,6 +102,7 @@ def analytic_gr(case_name: str, case_cfg: dict, r: np.ndarray, g_const: float) -
             r_in=case_cfg["r_in"],
             r_out=case_cfg["r_out"],
             G=g_const,
+            epsilon=epsilon_analytic,
         )
     raise ValueError(
         f"Case '{case_name}' has type '{tp}', but no analytic g_r is implemented for this type."
@@ -114,6 +116,54 @@ def make_rel_error(g_pred: np.ndarray, g_ref: np.ndarray, floor_frac: float = 1e
     small = np.abs(denom) < floor
     denom[small] = np.where(denom[small] >= 0.0, floor, -floor)
     return (g_pred - g_ref) / denom
+
+
+def gr_pinn_autodiff(
+    model: GravityPINN,
+    r_eval: np.ndarray,
+    phi_cut: float,
+    phi_scale: float,
+    device: torch.device,
+) -> np.ndarray:
+    """Compute g_r from autograd along a single azimuthal cut."""
+    phi_eval = np.full_like(r_eval, float(phi_cut), dtype=np.float64)
+    r_t = torch.tensor(r_eval, dtype=torch.float32, device=device, requires_grad=True)
+    p_t = torch.tensor(phi_eval, dtype=torch.float32, device=device, requires_grad=True)
+    g_r_raw, _ = model.gravity(r_t, p_t)
+    return g_r_raw.detach().cpu().numpy().astype(np.float64) * phi_scale
+
+
+def gr_pinn_fd(
+    model: GravityPINN,
+    r_eval: np.ndarray,
+    phi_grid: np.ndarray,
+    phi_cut: float,
+    phi_scale: float,
+    phi_offset: float,
+    fd_reduction: str,
+    device: torch.device,
+) -> np.ndarray:
+    """
+    Compute g_r via finite differences on predicted Phi in physical units.
+
+    fd_reduction:
+      - "avg": average Phi over phi, then differentiate in r
+      - "cut": take phi closest to phi_cut, then differentiate in r
+    """
+    rr, pp = np.meshgrid(r_eval, phi_grid, indexing="ij")
+    r_t = torch.tensor(rr.ravel(), dtype=torch.float32, device=device)
+    p_t = torch.tensor(pp.ravel(), dtype=torch.float32, device=device)
+    with torch.no_grad():
+        phi_raw = model(r_t, p_t).cpu().numpy().reshape(rr.shape)
+    phi_phys = phi_scale * phi_raw + phi_offset
+
+    if fd_reduction == "avg":
+        phi_line = np.mean(phi_phys, axis=1)
+    else:
+        j_cut = int(np.argmin(np.abs(phi_grid - float(phi_cut))))
+        phi_line = phi_phys[:, j_cut]
+
+    return -np.gradient(phi_line, r_eval, edge_order=2)
 
 
 def main():
@@ -135,6 +185,14 @@ def main():
                         help="Use points with |g_r,analytic| >= frac*max|g_r,analytic| for relative-error plot/metrics.")
     parser.add_argument("--expect-type", type=str, default=None,
                         help="Optional guard: fail if benchmark type is not this value.")
+    parser.add_argument("--epsilon-analytic", type=float, default=0.0,
+                        help="Softening length to use in analytic constant-annulus comparator.")
+    parser.add_argument("--gravity-method", type=str, default="autodiff",
+                        choices=["autodiff", "fd"],
+                        help="How to compute g_r from PINN.")
+    parser.add_argument("--fd-reduction", type=str, default="avg",
+                        choices=["avg", "cut"],
+                        help="FD method: reduce phi by azimuthal average or single phi cut.")
     args = parser.parse_args()
 
     outdir = Path(args.outdir)
@@ -159,10 +217,13 @@ def main():
         npz_path = Path(args.npz)
         data = np.load(npz_path)
         r_eval = data["r"].astype(np.float64)
+        phi_grid = data["phi"].astype(np.float64)
     else:
         r_min = float(cfg["domain"]["r_min"])
         r_max = float(cfg["domain"]["r_max"])
         r_eval = np.logspace(np.log10(r_min), np.log10(r_max), args.dense_nr)
+        n_phi = int(cfg["domain"]["N_phi"])
+        phi_grid = np.linspace(0.0, 2.0 * np.pi, n_phi, endpoint=False, dtype=np.float64)
 
     # Determine output scale for physical units.
     if args.phi_scale is not None:
@@ -173,15 +234,30 @@ def main():
     else:
         raise ValueError("Need either --phi-scale or --npz to recover physical scaling.")
 
-    # PINN g_r via auto-diff at phi = phi_cut.
-    phi_eval = np.full_like(r_eval, float(args.phi_cut), dtype=np.float64)
-    r_t = torch.tensor(r_eval, dtype=torch.float32, device=device, requires_grad=True)
-    p_t = torch.tensor(phi_eval, dtype=torch.float32, device=device, requires_grad=True)
-    g_r_raw, _ = model.gravity(r_t, p_t)
-    g_r_pinn = (g_r_raw.detach().cpu().numpy().astype(np.float64)) * phi_scale
+    # PINN g_r via selected method.
+    if args.gravity_method == "fd":
+        g_r_pinn = gr_pinn_fd(
+            model=model,
+            r_eval=r_eval,
+            phi_grid=phi_grid,
+            phi_cut=float(args.phi_cut),
+            phi_scale=phi_scale,
+            phi_offset=phi_offset,
+            fd_reduction=args.fd_reduction,
+            device=device,
+        )
+    else:
+        g_r_pinn = gr_pinn_autodiff(
+            model=model,
+            r_eval=r_eval,
+            phi_cut=float(args.phi_cut),
+            phi_scale=phi_scale,
+            device=device,
+        )
 
     # Analytic reference.
-    g_r_an = analytic_gr(args.case, case_cfg, r_eval, g_const)
+    g_r_an = analytic_gr(args.case, case_cfg, r_eval, g_const,
+                         epsilon_analytic=float(args.epsilon_analytic))
 
     # Metrics.
     rel_curve_all = make_rel_error(g_r_pinn, g_r_an)
@@ -255,8 +331,11 @@ def main():
         w.writerow(["phi_cut", args.phi_cut])
         w.writerow(["phi_scale", phi_scale])
         w.writerow(["phi_offset", phi_offset])
+        w.writerow(["gravity_method", args.gravity_method])
+        w.writerow(["fd_reduction", args.fd_reduction])
         w.writerow(["rel_mask_threshold", rel_threshold])
         w.writerow(["rel_mask_count", int(np.sum(mask))])
+        w.writerow(["epsilon_analytic", float(args.epsilon_analytic)])
         w.writerow(["L2_relative_error", l2_rel])
         w.writerow(["max_abs_relative_error", max_abs_rel])
         w.writerow(["radius_at_max_error_AU", r_at_max])
