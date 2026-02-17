@@ -1,14 +1,4 @@
-"""
-train.py — Training pipeline for the Gravity-PINN (Mode A: solver-per-Σ).
 
-Staged workflow:
-    Stage 0: Sanity checks (reference solver unit tests)
-    Stage 1: Train PINN for a single Σ field
-    Stage 2: Evaluate and compare against reference
-
-Usage:
-    python train.py --config config.yaml --case B1_smooth_disk --epsilon 0.5
-"""
 
 import os
 import sys
@@ -24,7 +14,7 @@ from pathlib import Path
 
 from physics import (
     make_polar_grid, cell_sizes, build_sigma,
-    compute_potential_direct, compute_potential_fft, compute_gravity_fd,
+    compute_potential_direct, compute_gravity_fd,
     evaluate_integral_at_points,
     phi_exponential_disk_analytic, gr_exponential_disk_analytic,
     rel_error_L2, rel_error_L2_with_floor, max_error
@@ -32,9 +22,9 @@ from physics import (
 from model import GravityPINN, total_loss
 
 
-# ============================================================
-# UTILITIES
-# ============================================================
+
+
+
 
 def load_config(path: str) -> dict:
     """Load YAML config."""
@@ -91,9 +81,9 @@ def set_global_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-# ============================================================
-# STAGE 0: SANITY CHECKS
-# ============================================================
+
+
+
 
 def stage0_sanity(cfg: dict) -> bool:
     """
@@ -109,39 +99,39 @@ def stage0_sanity(cfg: dict) -> bool:
     dom = cfg['domain']
     G = 1.0 if cfg['physics']['use_code_units'] else cfg['physics']['G']
     
-    # Small grid for fast validation
+    
     Nr_test, Nphi_test = 64, 64
     r_1d, phi_1d, R, PHI = make_polar_grid(dom['r_min'], dom['r_max'],
                                             Nr_test, Nphi_test)
     dr, dphi = cell_sizes(r_1d, phi_1d)
     
-    # --- Test 1: Exponential disk, axisymmetric ---
+    
     print("\n[Test 1] Exponential disk Σ = Σ₀ exp(-r/R)")
     Sigma_0, R_scale = 10.0, 10.0
     Sigma = Sigma_0 * np.exp(-R / R_scale)
     
-    # Reference solver (direct sum, with singular correction)
-    eps_test = dr[len(dr)//2]  # use mid-grid cell size as epsilon
+    
+    eps_test = dr[len(dr)//2]  
     Phi_ref = compute_potential_direct(
         r_1d, phi_1d, Sigma, r_1d, phi_1d, dr, dphi,
         G=G, epsilon=eps_test, use_singular_correction=False)
     
-    # Analytic solution (axisymmetric: take azimuthal average)
+    
     Phi_analytic = phi_exponential_disk_analytic(r_1d, Sigma_0, R_scale, G)
     Phi_ref_avg = np.mean(Phi_ref, axis=1)
     
-    # Compare
+    
     err = rel_error_L2(Phi_ref_avg, Phi_analytic)
     print(f"  ε = {eps_test:.4f} (mid-grid Δr)")
     print(f"  Relative L2 error (Φ_ref vs analytic): {err:.4e}")
     
-    # Check shape: potential should be negative (attractive)
-    if np.all(Phi_ref_avg < 0):
-        print("  ✓ Potential is negative everywhere (attractive)")
-    else:
-        print("  ✗ WARNING: Potential has positive values")
     
-    # Check axisymmetry: std across φ should be small
+    if np.all(Phi_ref_avg < 0):
+        print("Potential is negative everywhere (attractive)")
+    else:
+        print("Potential has positive values")
+    
+    
     phi_std = np.std(Phi_ref, axis=1)
     max_asym = np.max(phi_std / (np.abs(Phi_ref_avg) + 1e-10))
     print(f"  Max azimuthal asymmetry: {max_asym:.4e}")
@@ -150,41 +140,26 @@ def stage0_sanity(cfg: dict) -> bool:
     else:
         print(f"  ⚠ Notable asymmetry ({max_asym:.2%}) — may be grid artifact")
     
-    # --- Test 2: Symmetry check ---
+    
     print("\n[Test 2] Potential symmetry check")
-    # For axisymmetric Σ, Φ(r, φ) should not depend on φ
+    
     Phi_phi0 = Phi_ref[:, 0]
     Phi_phipi = Phi_ref[:, Nphi_test // 2]
     sym_err = rel_error_L2(Phi_phi0, Phi_phipi)
     print(f"  |Φ(r,0) - Φ(r,π)| / |Φ|: {sym_err:.4e}")
     
-    passed = err < 0.2 and max_asym < 0.1  # Generous thresholds for coarse grid
+    passed = err < 0.2 and max_asym < 0.1  
     status = "PASSED" if passed else "FAILED"
     print(f"\n[Stage 0] {status}")
     return passed
 
 
-# ============================================================
-# STAGE 1: TRAIN PINN
-# ============================================================
+
+
+
 
 def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
                  device: torch.device, outdir: str) -> dict:
-    """
-    Train PINN Mode A for a single Σ field.
-    
-    Parameters
-    ----------
-    cfg        : full config dict
-    case_name  : benchmark case key (e.g. 'B1_smooth_disk')
-    epsilon_dr : smoothing in units of local Δr
-    device     : torch device
-    outdir     : output directory
-    
-    Returns
-    -------
-    results : dict with trained model, errors, timing
-    """
     print("\n" + "="*60)
     print(f"STAGE 1: Training PINN — case={case_name}, ε/Δr={epsilon_dr}")
     print("="*60)
@@ -195,7 +170,7 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
     net_cfg = pinn_cfg['network']
     train_cfg = pinn_cfg['training']
     
-    # --- Build grid and Σ ---
+    
     r_1d, phi_1d, R, PHI = make_polar_grid(
         dom['r_min'], dom['r_max'], dom['N_r'], dom['N_phi'])
     dr, dphi = cell_sizes(r_1d, phi_1d)
@@ -203,43 +178,35 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
     case_cfg = cfg['benchmarks'][case_name]
     Sigma = build_sigma(R, PHI, case_cfg)
     
-    # Compute physical epsilon from Δr-relative value
+    
     dr_mid = dr[len(dr) // 2]
     epsilon = epsilon_dr * dr_mid
     print(f"  Physical ε = {epsilon:.4f} AU (Δr_mid = {dr_mid:.4f} AU)")
     
-    # --- Compute reference solution ---
-    use_fft_ref = (epsilon == 0.0 and cfg['smoothing']['use_singular_cell_correction'])
-    ref_label = "fft convolution (ε=0 + singular correction)" if use_fft_ref else "direct sum"
-    print(f"  Computing reference Φ ({ref_label})...")
+    
+    print("  Computing reference Φ (direct sum)...")
     t0 = time.time()
-    if use_fft_ref:
-        Phi_ref = compute_potential_fft(
-            Sigma, r_1d, phi_1d, dr, dphi,
-            G=G, epsilon=0.0, use_singular_correction=True
-        )
-    else:
-        Phi_ref = compute_potential_direct(
-            r_1d, phi_1d, Sigma, r_1d, phi_1d, dr, dphi,
-            G=G, epsilon=epsilon, use_singular_correction=False
-        )
+    Phi_ref = compute_potential_direct(
+        r_1d, phi_1d, Sigma, r_1d, phi_1d, dr, dphi,
+        G=G, epsilon=epsilon,
+        use_singular_correction=(epsilon == 0.0 and cfg['smoothing']['use_singular_cell_correction']))
     t_ref = time.time() - t0
     print(f"  Reference solver time: {t_ref:.1f} s")
     
-    # Reference gravity
+    
     g_r_ref, g_phi_ref = compute_gravity_fd(Phi_ref, r_1d, phi_1d)
     
-    # Remove mean for gauge
+    
     Phi_ref_mean = np.mean(Phi_ref)
     Phi_ref_zero = Phi_ref - Phi_ref_mean
     phi_scale = np.std(Phi_ref_zero)
     phi_scale = max(phi_scale, 1e-8)
     print(f"  Target normalization scale σ(Φ) = {phi_scale:.4e}")
     
-    # --- Sample collocation points ---
+    
     N_coll = train_cfg['batch_size']
     
-    # --- Build model ---
+    
     model = GravityPINN(
         hidden_layers=net_cfg['hidden_layers'],
         hidden_units=net_cfg['hidden_units'],
@@ -252,29 +219,29 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
     print(f"  Network: {net_cfg['hidden_layers']} layers × {net_cfg['hidden_units']} units")
     print(f"  Total parameters: {n_params:,}")
     
-    # --- Optimizer ---
+    
     optimizer = optim.Adam(model.parameters(), lr=train_cfg['lr_initial'])
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=train_cfg['epochs'], eta_min=train_cfg['lr_min'])
     
-    # --- Logger ---
+    
     log_path = os.path.join(outdir, f'train_{case_name}_eps{epsilon_dr:.2f}.csv')
     logger = MetricsLogger(log_path, ['epoch', 'loss_total', 'loss_integral',
                                        'loss_gauge', 'loss_force',
                                        'loss_smoothness', 'lr', 'time_s'])
     
-    # --- Pre-compute integral targets on grid ---
-    # Flatten grid for training
+    
+    
     r_flat = R.ravel()
     phi_flat = PHI.ravel()
     Phi_target_flat = (Phi_ref_zero / phi_scale).ravel()
-    # Because the network predicts normalized Φ, its auto-diff gravity is
-    # normalized by the same scale.
+    
+    
     g_r_target_flat = (g_r_ref / phi_scale).ravel()
     g_phi_target_flat = (g_phi_ref / phi_scale).ravel()
     N_grid = len(r_flat)
     
-    # --- Training loop ---
+    
     loss_weights = train_cfg['loss_weights']
     best_loss = float('inf')
     patience_counter = 0
@@ -285,7 +252,7 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
     for epoch in range(1, train_cfg['epochs'] + 1):
         model.train()
         
-        # Sample batch (random subset of grid points)
+        
         idx = np.random.choice(N_grid, size=min(N_coll, N_grid), replace=False)
         r_batch = torch.tensor(r_flat[idx], dtype=torch.float32, device=device)
         phi_batch = torch.tensor(phi_flat[idx], dtype=torch.float32, device=device)
@@ -293,21 +260,21 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
         g_r_target_batch = torch.tensor(g_r_target_flat[idx], dtype=torch.float32, device=device)
         g_phi_target_batch = torch.tensor(g_phi_target_flat[idx], dtype=torch.float32, device=device)
         
-        # Forward + loss
+        
         optimizer.zero_grad()
         L_total, components = total_loss(model, r_batch, phi_batch,
                                           Phi_target_batch, loss_weights,
                                           g_r_target=g_r_target_batch,
                                           g_phi_target=g_phi_target_batch)
         
-        # Backward
+        
         L_total.backward()
         if train_cfg.get('grad_clip', 0) > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg['grad_clip'])
         optimizer.step()
         scheduler.step()
         
-        # Logging
+        
         if epoch % 100 == 0 or epoch == 1:
             lr = optimizer.param_groups[0]['lr']
             elapsed = time.time() - t_train_start
@@ -327,11 +294,11 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
                       f"| L_force={components.get('force', 0.0):.4e} "
                       f"| lr={lr:.2e} | {elapsed:.0f}s")
         
-        # Early stopping check
+        
         if components['total'] < best_loss:
             best_loss = components['total']
             patience_counter = 0
-            # Save best model
+            
             save_checkpoint(model, optimizer, epoch, best_loss,
                            os.path.join(outdir, f'best_{case_name}_eps{epsilon_dr:.2f}.pt'))
         else:
@@ -344,7 +311,7 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
     t_train = time.time() - t_train_start
     print(f"  Training time: {t_train:.1f} s")
     
-    # --- Evaluate on full grid ---
+    
     model.eval()
     with torch.no_grad():
         r_eval_t = torch.tensor(r_flat, dtype=torch.float32, device=device)
@@ -353,14 +320,14 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
     
     Phi_pinn = (Phi_pinn_flat * phi_scale).reshape(R.shape)
     
-    # Compute PINN gravity via finite differences on predicted Φ
+    
     g_r_pinn, g_phi_pinn = compute_gravity_fd(Phi_pinn, r_1d, phi_1d)
     
-    # Errors
+    
     err_Phi = rel_error_L2(Phi_pinn, Phi_ref_zero)
     err_gr = rel_error_L2(g_r_pinn, g_r_ref)
     err_gphi_raw = rel_error_L2(g_phi_pinn, g_phi_ref)
-    # For near-axisymmetric cases g_phi_ref ~ 0, use g_r scale as floor.
+    
     gphi_ref_norm = np.linalg.norm(g_phi_ref)
     gr_ref_norm = np.linalg.norm(g_r_ref)
     gphi_floor = gr_ref_norm
@@ -392,9 +359,9 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
     }
 
 
-# ============================================================
-# STAGE 2: EVALUATION AND REPORTING
-# ============================================================
+
+
+
 
 def stage2_evaluate(results: dict, cfg: dict, case_name: str, outdir: str):
     """
@@ -420,7 +387,7 @@ def stage2_evaluate(results: dict, cfg: dict, case_name: str, outdir: str):
     PHI = results['PHI']
     eps_dr = results['epsilon_dr']
     
-    # --- Save error summary ---
+    
     summary_path = os.path.join(outdir, f'summary_{case_name}_eps{eps_dr:.2f}.csv')
     with open(summary_path, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -444,7 +411,7 @@ def stage2_evaluate(results: dict, cfg: dict, case_name: str, outdir: str):
     dpi = eval_cfg.get('plot_dpi', 150)
     fmt = eval_cfg.get('plot_format', 'png')
     
-    # --- Plot 1: 2D potential maps (ref, PINN, error) ---
+    
     fig, axes = plt.subplots(1, 3, figsize=(16, 5), subplot_kw={'projection': 'polar'})
     
     vmin = min(np.min(results['Phi_ref']), np.min(results['Phi_pinn']))
@@ -478,7 +445,7 @@ def stage2_evaluate(results: dict, cfg: dict, case_name: str, outdir: str):
     plt.close()
     print(f"  Saved: {plot_path}")
     
-    # --- Plot 2: Radial cuts ---
+    
     cut_phis = eval_cfg.get('radial_cut_phis', [0.0, np.pi/2, np.pi])
     
     fig, axes = plt.subplots(1, len(cut_phis), figsize=(5 * len(cut_phis), 4))
@@ -502,10 +469,10 @@ def stage2_evaluate(results: dict, cfg: dict, case_name: str, outdir: str):
     plt.close()
     print(f"  Saved: {plot_path}")
     
-    # --- Plot 3: Gravity comparison ---
+    
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     
-    j0 = 0  # φ = 0 cut
+    j0 = 0  
     axes[0].semilogx(r_1d, results['g_r_ref'][:, j0], 'k-', label='Reference', lw=2)
     axes[0].semilogx(r_1d, results['g_r_pinn'][:, j0], 'r--', label='PINN', lw=1.5)
     axes[0].set_xlabel('r [AU]')
@@ -528,7 +495,7 @@ def stage2_evaluate(results: dict, cfg: dict, case_name: str, outdir: str):
     plt.close()
     print(f"  Saved: {plot_path}")
     
-    # --- Save numerical data ---
+    
     np.savez(os.path.join(outdir, f'data_{case_name}_eps{eps_dr:.2f}.npz'),
              r=r_1d, phi=phi_1d, R=R, PHI=PHI,
              Sigma=results['Sigma'],
@@ -538,9 +505,9 @@ def stage2_evaluate(results: dict, cfg: dict, case_name: str, outdir: str):
     print(f"  Saved: data_{case_name}_eps{eps_dr:.2f}.npz")
 
 
-# ============================================================
-# MAIN
-# ============================================================
+
+
+
 
 def main():
     parser = argparse.ArgumentParser(description='Gravity-PINN Trainer')
@@ -564,10 +531,10 @@ def main():
                         help='Random seed for reproducible training')
     args = parser.parse_args()
     
-    # Load config
+    
     cfg = load_config(args.config)
 
-    # Optional runtime overrides for faster experiments
+    
     if args.epochs is not None:
         cfg['pinn_modeA']['training']['epochs'] = int(args.epochs)
     if args.batch_size is not None:
@@ -578,13 +545,13 @@ def main():
     if args.seed is not None:
         set_global_seed(int(args.seed))
     
-    # Output directory
+    
     os.makedirs(args.outdir, exist_ok=True)
     
-    # Device
+    
     device = setup_device()
     
-    # Epsilon
+    
     eps_dr = args.epsilon if args.epsilon is not None else cfg['smoothing']['default_epsilon_dr']
     
     print("="*60)
@@ -597,16 +564,16 @@ def main():
     if args.seed is not None:
         print(f"  Seed:    {args.seed}")
     
-    # Stage 0: Sanity checks
+    
     if not args.skip_sanity:
         passed = stage0_sanity(cfg)
         if not passed:
-            print("\n⚠ Sanity checks had issues — proceeding anyway")
+            print("\nSanity checks had issues")
     
-    # Stage 1: Train
+    
     results = stage1_train(cfg, args.case, eps_dr, device, args.outdir)
     
-    # Stage 2: Evaluate
+    
     stage2_evaluate(results, cfg, args.case, args.outdir)
     
     print("\n" + "="*60)
