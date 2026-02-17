@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from physics import (
     make_polar_grid, cell_sizes, build_sigma,
     sigma_exponential, sigma_exponential_perturbed, sigma_clump, sigma_constant,
-    compute_potential_direct, compute_gravity_fd,
+    compute_potential_direct, compute_potential_fft, compute_gravity_fd,
     evaluate_integral_at_points,
     phi_exponential_disk_analytic, gr_exponential_disk_analytic,
     gr_constant_disk_analytic, phi_constant_disk_axisym_quadrature,
@@ -342,6 +342,44 @@ def test_constant_annulus_matched_epsilon_reference(results: TestResults):
     results.record("Matched-ε annulus REF vs quadrature (g_r)", err < 0.30,
                    f"rel err = {err:.3e}")
     results.record("Matched-ε annulus sign consistency", sign_mismatch < 0.05,
+                   f"sign mismatch frac = {sign_mismatch:.3f}")
+
+
+def test_constant_annulus_eps0_fft_reference(results: TestResults):
+    """
+    Regression check: ε=0 FFT reference should stay close to axisymmetric quadrature
+    for the full-domain constant annulus in the interior radial band.
+    """
+    print("\n--- Constant annulus ε=0 FFT REF check ---")
+
+    Nr, Nphi = 128, 128
+    dom_rmin, dom_rmax = 0.2, 100.0
+    Sigma_0 = 100.0
+    r_in, r_out = 0.2, 100.0
+
+    r_1d, phi_1d, R, PHI = make_polar_grid(dom_rmin, dom_rmax, Nr, Nphi)
+    dr, dphi = cell_sizes(r_1d, phi_1d)
+    Sigma = sigma_constant(R, PHI, Sigma_0=Sigma_0, r_in=r_in, r_out=r_out)
+
+    Phi_ref = compute_potential_fft(
+        Sigma, r_1d, phi_1d, dr, dphi,
+        G=1.0, epsilon=0.0, use_singular_correction=True
+    )
+    g_r_ref, _ = compute_gravity_fd(Phi_ref, r_1d, phi_1d)
+    g_r_ref_avg = np.mean(g_r_ref, axis=1)
+
+    g_r_quad = gr_constant_disk_axisym_quadrature(
+        r_1d, Sigma_0=Sigma_0, r_in=r_in, r_out=r_out, G=1.0
+    )
+
+    # Avoid boundary-dominated cells; compare where Figure-B.2 style curves are read.
+    mask = (r_1d > 1.0) & (r_1d < 50.0)
+    err = rel_error_L2(g_r_ref_avg[mask], g_r_quad[mask])
+    sign_mismatch = np.mean(np.sign(g_r_ref_avg[mask]) != np.sign(g_r_quad[mask]))
+
+    results.record("ε=0 FFT annulus REF vs quadrature (g_r)", err < 0.10,
+                   f"rel err = {err:.3e}")
+    results.record("ε=0 FFT annulus sign consistency", sign_mismatch < 0.05,
                    f"sign mismatch frac = {sign_mismatch:.3f}")
 
 
@@ -839,6 +877,7 @@ def main():
         test_point_integral_matches_direct(results)
         test_constant_annulus_quadrature_validator(results)
         test_constant_annulus_matched_epsilon_reference(results)
+        test_constant_annulus_eps0_fft_reference(results)
     
     
     test_pinn_smoke(results)

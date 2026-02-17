@@ -24,7 +24,7 @@ from pathlib import Path
 
 from physics import (
     make_polar_grid, cell_sizes, build_sigma,
-    compute_potential_direct, compute_gravity_fd,
+    compute_potential_direct, compute_potential_fft, compute_gravity_fd,
     evaluate_integral_at_points,
     phi_exponential_disk_analytic, gr_exponential_disk_analytic,
     rel_error_L2, rel_error_L2_with_floor, max_error
@@ -209,12 +209,20 @@ def stage1_train(cfg: dict, case_name: str, epsilon_dr: float,
     print(f"  Physical ε = {epsilon:.4f} AU (Δr_mid = {dr_mid:.4f} AU)")
     
     # --- Compute reference solution ---
-    print("  Computing reference Φ (direct sum)...")
+    use_fft_ref = (epsilon == 0.0 and cfg['smoothing']['use_singular_cell_correction'])
+    ref_label = "fft convolution (ε=0 + singular correction)" if use_fft_ref else "direct sum"
+    print(f"  Computing reference Φ ({ref_label})...")
     t0 = time.time()
-    Phi_ref = compute_potential_direct(
-        r_1d, phi_1d, Sigma, r_1d, phi_1d, dr, dphi,
-        G=G, epsilon=epsilon,
-        use_singular_correction=(epsilon == 0.0 and cfg['smoothing']['use_singular_cell_correction']))
+    if use_fft_ref:
+        Phi_ref = compute_potential_fft(
+            Sigma, r_1d, phi_1d, dr, dphi,
+            G=G, epsilon=0.0, use_singular_correction=True
+        )
+    else:
+        Phi_ref = compute_potential_direct(
+            r_1d, phi_1d, Sigma, r_1d, phi_1d, dr, dphi,
+            G=G, epsilon=epsilon, use_singular_correction=False
+        )
     t_ref = time.time() - t0
     print(f"  Reference solver time: {t_ref:.1f} s")
     
