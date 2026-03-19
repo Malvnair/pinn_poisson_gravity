@@ -1,0 +1,110 @@
+domain:
+  r_min: 0.2
+  r_max: 100.0
+  N_r: 128
+  N_phi: 128
+
+
+physics:
+  G: 6.674e-8
+  use_code_units: true
+
+
+smoothing:
+  epsilon_list: [0.0, 0.25, 0.5, 1.0, 2.0]
+  default_epsilon_dr: 0.0
+  use_singular_cell_correction: true
+
+
+benchmarks:
+  B1_smooth_disk:
+    type: "exponential"
+    Sigma_0: 10.0
+    R_scale: 10.0
+
+  B2_nonaxisymmetric:
+    type: "exponential_perturbed"
+    Sigma_0: 10.0
+    R_scale: 10.0
+    A_pert: 0.3
+    m_mode: 2
+
+  B3_single_clump:
+    type: "clump_on_background"
+    Sigma_bg: 1.0
+    Sigma_clump: 50.0
+    r_clump: 20.0
+    phi_clump: 1.57
+    sigma_r: 3.0
+    sigma_phi: 0.3
+
+  B4_multi_clump:
+    type: "multi_clump"
+    Sigma_bg: 1.0
+    clumps:
+      - {Sigma: 40.0, r: 15.0, phi: 0.5, sigma_r: 2.0, sigma_phi: 0.2}
+      - {Sigma: 60.0, r: 30.0, phi: 2.5, sigma_r: 4.0, sigma_phi: 0.3}
+      - {Sigma: 25.0, r: 50.0, phi: 4.5, sigma_r: 5.0, sigma_phi: 0.4}
+
+  B5_constant_density:
+    type: "constant"
+    Sigma_0: 100.0
+    r_in: 0.2
+    r_out: 100.0
+
+
+pinn_modeA:
+  network:
+    hidden_layers: 6
+    hidden_units: 128
+    activation: "siren"
+    siren_omega_0: 10.0
+    siren_omega: 1.0
+
+  training:
+    epochs: 2000
+    batch_size: 4096
+    optimizer: "adam"
+    lr_initial: 1.0e-3
+    lr_min: 1.0e-6
+    lr_schedule: "cosine"
+    grad_clip: 1.0
+
+    gauge: "mean_zero"
+    anchor_r: 100.0
+    anchor_phi: 0.0
+
+    loss_weights:
+      integral: 1.0
+      gauge: 10.0
+      force: 0.7
+      smoothness: 0.001
+
+    patience: 2000
+    rel_tol: 1.0e-4
+
+
+pinn_modeB:
+  enabled: false
+  n_training_snapshots: 200
+  n_validation_snapshots: 50
+
+  network:
+    type: "fno_polar"
+    modes_r: 16
+    modes_phi: 16
+    width: 64
+    n_layers: 4
+
+  training:
+    epochs: 500
+    batch_size: 16
+    lr: 1.0e-3
+
+
+evaluation:
+  save_plots: true
+  plot_format: "png"
+  plot_dpi: 150
+  save_csv: true
+  radial_cut_phis: [0.0, 1.5708, 3.1416]

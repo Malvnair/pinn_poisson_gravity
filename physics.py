@@ -438,71 +438,107 @@ def gr_constant_disk_axisym_quadrature_softened(
 
 
 
+def build_integral_source_cache(Sigma: np.ndarray,
+                                r_grid: np.ndarray, phi_grid: np.ndarray,
+                                dr: np.ndarray, dphi: float) -> Dict[str, Any]:
+    Nphi_src = len(phi_grid)
+    R_src, PHI_src = np.meshgrid(r_grid, phi_grid, indexing='ij')
+    dr_src = np.outer(dr, np.ones(Nphi_src, dtype=np.float64))
+    weight = Sigma * R_src * dr_src * dphi
+    return {
+        'weight_flat': weight.ravel().astype(np.float64, copy=False),
+        'r_src_flat': R_src.ravel().astype(np.float64, copy=False),
+        'phi_src_flat': PHI_src.ravel().astype(np.float64, copy=False),
+        'Nphi_src': int(Nphi_src),
+    }
+
+
 def evaluate_integral_at_points(r_eval: np.ndarray, phi_eval: np.ndarray,
                                 Sigma: np.ndarray,
                                 r_grid: np.ndarray, phi_grid: np.ndarray,
                                 dr: np.ndarray, dphi: float,
                                 G: float = 1.0,
                                 epsilon: float = 0.0,
-                                use_singular_correction: bool = False
+                                use_singular_correction: bool = False,
+                                source_cache: Optional[Dict[str, Any]] = None,
+                                max_pairs: int = 2_000_000
                                 ) -> np.ndarray:
+    r_eval = np.asarray(r_eval, dtype=np.float64).reshape(-1)
+    phi_eval = np.asarray(phi_eval, dtype=np.float64).reshape(-1)
+    if len(r_eval) != len(phi_eval):
+        raise ValueError("r_eval and phi_eval must have the same length")
+
+    if source_cache is None:
+        source_cache = build_integral_source_cache(Sigma, r_grid, phi_grid, dr, dphi)
+
+    weight_flat = source_cache['weight_flat']
+    r_src_flat = source_cache['r_src_flat']
+    phi_src_flat = source_cache['phi_src_flat']
+    Nphi_src = int(source_cache['Nphi_src'])
+
     N = len(r_eval)
-    Nr_src = len(r_grid)
-    Nphi_src = len(phi_grid)
-    
-    
-    R_SRC, PHI_SRC = np.meshgrid(r_grid, phi_grid, indexing='ij')
-    DR_SRC = np.outer(dr, np.ones(Nphi_src))
-    weight = Sigma * R_SRC * DR_SRC * dphi  
-    weight_flat = weight.ravel()
-    r_src_flat = R_SRC.ravel()
-    phi_src_flat = PHI_SRC.ravel()
-    
+    N_src = len(r_src_flat)
     Phi_eval = np.zeros(N, dtype=np.float64)
-    
-    for n in range(N):
-        cos_dphi = np.cos(phi_eval[n] - phi_src_flat)
-        dist_sq = (r_eval[n]**2 + r_src_flat**2
-                   - 2.0 * r_eval[n] * r_src_flat * cos_dphi
-                   + epsilon**2)
-        
+
+    if N == 0:
+        return Phi_eval
+
+    chunk_size = max(1, min(N, max_pairs // max(N_src, 1)))
+
+    if epsilon == 0.0 and use_singular_correction:
+        idx_hi = np.searchsorted(r_grid, r_eval)
+        idx_hi = np.clip(idx_hi, 0, len(r_grid) - 1)
+        idx_lo = np.clip(idx_hi - 1, 0, len(r_grid) - 1)
+        choose_hi = np.abs(r_grid[idx_hi] - r_eval) < np.abs(r_grid[idx_lo] - r_eval)
+        i_self = np.where(choose_hi, idx_hi, idx_lo)
+
+        phi_wrapped = np.mod(phi_eval, 2.0 * np.pi)
+        j_self = np.mod(np.rint(phi_wrapped / dphi).astype(int), Nphi_src)
+
+        r_dist = np.abs(r_eval - r_grid[i_self])
+        phi_dist = np.abs(np.arctan2(np.sin(phi_eval - phi_grid[j_self]),
+                                     np.cos(phi_eval - phi_grid[j_self])))
+        is_on_grid = (r_dist < 0.5 * dr[i_self]) & (phi_dist < 0.5 * dphi)
+    else:
+        i_self = None
+        j_self = None
+        is_on_grid = None
+
+    for start in range(0, N, chunk_size):
+        stop = min(start + chunk_size, N)
+        r_chunk = r_eval[start:stop]
+        phi_chunk = phi_eval[start:stop]
+
+        cos_dphi = np.cos(phi_chunk[:, None] - phi_src_flat[None, :])
+        dist_sq = (r_chunk[:, None] ** 2 + r_src_flat[None, :] ** 2
+                   - 2.0 * r_chunk[:, None] * r_src_flat[None, :] * cos_dphi
+                   + epsilon ** 2)
+        inv_dist = 1.0 / np.sqrt(np.maximum(dist_sq, 1e-30))
+
         if epsilon == 0.0 and use_singular_correction:
-            
-            i_self = np.argmin(np.abs(r_grid - r_eval[n]))
-            j_self = np.argmin(np.abs(phi_grid - phi_eval[n]))
-            k_self = i_self * Nphi_src + j_self
-            
-            
-            r_dist = abs(r_eval[n] - r_grid[i_self])
-            phi_dist = abs(phi_eval[n] - phi_grid[j_self])
-            is_on_grid = (r_dist < 0.5 * dr[i_self] and phi_dist < 0.5 * dphi)
-            
-            if is_on_grid:
-                
-                mask = np.ones(len(r_src_flat), dtype=bool)
-                mask[k_self] = False
-                
-                inv_dist = np.zeros_like(dist_sq)
-                inv_dist[mask] = 1.0 / np.sqrt(np.maximum(dist_sq[mask], 1e-30))
-                Phi_eval[n] = -G * np.dot(weight_flat[mask], inv_dist[mask])
-                
-                
-                r_s = r_grid[i_self]
-                du_cell = dr[i_self] / r_s  
-                S_self = r_s**1.5 * Sigma[i_self, j_self]
+            local_on_grid = is_on_grid[start:stop]
+            if np.any(local_on_grid):
+                local_i = i_self[start:stop]
+                local_j = j_self[start:stop]
+                local_k = local_i * Nphi_src + local_j
+                row_idx = np.nonzero(local_on_grid)[0]
+                inv_dist[row_idx, local_k[local_on_grid]] = 0.0
+
+                Phi_chunk = -G * (inv_dist @ weight_flat)
+
+                r_s = r_grid[local_i[local_on_grid]]
+                du_cell = dr[local_i[local_on_grid]] / r_s
+                S_self = r_s ** 1.5 * Sigma[local_i[local_on_grid], local_j[local_on_grid]]
                 V_self = -2.0 * G * S_self * (
                     np.arcsinh(dphi / du_cell) / dphi
                     + np.arcsinh(du_cell / dphi) / du_cell
                 )
-                Phi_eval[n] += V_self / np.sqrt(r_s)
-            else:
-                
-                inv_dist = 1.0 / np.sqrt(np.maximum(dist_sq, 1e-30))
-                Phi_eval[n] = -G * np.dot(weight_flat, inv_dist)
-        else:
-            inv_dist = 1.0 / np.sqrt(np.maximum(dist_sq, 1e-30))
-            Phi_eval[n] = -G * np.dot(weight_flat, inv_dist)
-    
+                Phi_chunk[row_idx] += V_self / np.sqrt(r_s)
+                Phi_eval[start:stop] = Phi_chunk
+                continue
+
+        Phi_eval[start:stop] = -G * (inv_dist @ weight_flat)
+
     return Phi_eval
 
 
